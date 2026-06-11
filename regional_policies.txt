@@ -1,0 +1,6 @@
+DXB-North Zone: Maximum equipment height allowed on any structure is 45 meters.
+DXB-South Zone: Maximum equipment height allowed on any structure is 60 meters.
+SHJ-South Zone: Due to the ocean, no single tenant asset may exceed 15kg.
+SHJ-Coastal Zone: Due to wind-load factors near the ocean, no single tenant asset may exceed 25kg.
+AUH-Coastal Zone: Due to wind-load factors near the ocean, no single tenant asset may exceed 30kg.
+AUH-Central Zone: Maximum equipment height allowed on any structure is 55 meters.
