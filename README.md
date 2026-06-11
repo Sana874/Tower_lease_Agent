@@ -20,7 +20,7 @@ The main thing I was careful about is that the AI does NOT make the decision. It
 
 Because of that the whole thing also runs without any AI/API at all - it falls back to a regex parser. That's the mode the test cases use.
 
-## Additional work that wasnt a part of the requirement
+## Additional scope covered as a part of this project
 
 - Pounds vs kg. People write "33 lb" not always "15 kg". If you just read the number and treat it as kg you get the load wrong, so I convert lb to kg first.
 - Same tower, multiple requests. Two requests can each fit on their own but not both. So once something's approved I "reserve" that weight, and the next request sees the real space left. Otherwise you'd approve two things that overload the tower.
