@@ -1,0 +1,27 @@
+What the agent does ->
+Reads a free-text lease request, figures out the operator / asset / weight / height / tower, checks it against tower capacity and the regional rules, and returns APPROVED, REJECTED, or NEEDS_REVIEW with the reasoning attached.
+
+The one decision that matters ->
+The LLM never decides the verdict. It only reads the request and gathers facts (which tower, what region, convert units). The approve/reject call is made by plain deterministic rules in `Rules.decide`.
+
+Why -> a structural weight check is a safety decision. If an LLM does the arithmetic it can be wrong in ways you can't reproduce or audit, and "the model said so" is not something you want in a compliance trail. So the model handles the fuzzy part (language) and code handles the part that has to be exactly right (the maths and the final call). With no API key it falls back to a regex extractor, so the same rules run either way.
+
+Things the requirements didn't ask for but a real system needs ->
+- Units: Tenants write "33 lb" as often as "15 kg". Comparing a pounds number
+  against a kg limit silently mis-sizes the load, so weights are normalised to kg
+  before any check. A pounds figure that would've been wrongly rejected now clears. 
+
+- Cumulative load: Two requests on the same tower can each fit but not fit
+  together. The agent reserves capacity as it approves, so the second request sees the real remaining headroom, not the original. This is the obvious failure mode
+  the moment you process more than one request.
+
+- Confidence routing: If extraction is shaky (missing fields, ambiguous text),
+  it goes to a human even when the rules would pass it. Better a held lease than a wrong auto-approval on a structure.
+
+- Sanity checks: Zero or negative weight/height never reaches the rules.
+
+- Audit log: Every decision is appended to `audit_log.jsonl` — what was asked,
+  what was decided, how confident. That's the record you need when a tenant disputes a rejection.
+
+Impact ->
+Batch mode reports auto-decision rate, the recurring revenue the approvals unlock, and the analyst hours saved versus reviewing each request by hand. Numbers run off stated pricing/cost assumptions at the top of the file — point is the agent turns a manual queue into a measured, mostly-automated pipeline with a human only on the genuinely uncertain cases.
