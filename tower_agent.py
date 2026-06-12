@@ -114,17 +114,75 @@ class Inventory:
 OPERATORS = ["Etisalat", "e&", "Du", "Vodafone", "Verizon", "Zain", "STC",
              "Ooredoo", "Batelco", "Orange"]
 
+# words->number so "forty meters" / "twenty-eight kg" parse like "40" / "28".
+_NUMWORD: dict[str, int] = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
+}
+# a run of number words, optionally joined by spaces/hyphens/"and"
+_NUMRUN = re.compile(
+    r"\b(?:" + "|".join(sorted(_NUMWORD, key=len, reverse=True)) +
+    r")(?:[\s-]+(?:and[\s-]+)?(?:" +
+    "|".join(sorted(_NUMWORD, key=len, reverse=True)) + r"))*\b",
+    re.I,
+)
+
+
+def _run_to_int(run: str) -> int:
+    total = current = 0
+    for tok in re.split(r"[\s-]+", run.lower()):
+        if tok in ("", "and"):
+            continue
+        v = _NUMWORD[tok]
+        if v == 100:
+            current = (current or 1) * 100
+        elif v == 1000:
+            total += (current or 1) * 1000
+            current = 0
+        else:
+            current += v
+    return total + current
+
+
+def digitize(text: str) -> str:
+    """Replace spelled-out numbers with digits so the unit regexes can read them."""
+    return _NUMRUN.sub(lambda m: str(_run_to_int(m.group(0))), text)
+
+
+def normalize_tower(text: str) -> tuple[str | None, list[str]]:
+    """Accept TWR-101, TWR101, TWR 101, 'tower 101', '#101' -> 'TWR-101'."""
+    notes: list[str] = []
+    ids: list[str] = []
+    for m in re.finditer(r"\bTWR[\s\-]?0*(\d{1,4})\b", text, re.I):
+        ids.append(f"TWR-{m.group(1)}")
+    if not ids:  # no explicit TWR token; try "tower 101" / "tower #101"
+        for m in re.finditer(r"\btower\s*#?\s*0*(\d{1,4})\b", text, re.I):
+            ids.append(f"TWR-{m.group(1)}")
+        if ids:
+            notes.append("inferred tower id from loose wording")
+    if not ids:
+        return None, notes
+    if len(set(ids)) > 1:
+        notes.append("multiple tower IDs found; used the first")
+    return ids[0], notes
+
 
 def parse_weight(text: str) -> tuple[float | None, list[str]]:
     """Pull a weight and normalise to kg. Pounds are a real trap here - a 33 lb
-    asset read as 33 kg can wrongly clear a load check, so convert explicitly."""
+    asset read as 33 kg can wrongly clear a load check, so convert explicitly.
+    Tolerates hyphenated units ('15-kg') and spelled-out numbers."""
     notes: list[str] = []
-    lb = re.search(r"(\d+(?:\.\d+)?)\s*(?:lb|lbs|pound)", text, re.I)
+    text = digitize(text)
+    lb = re.search(r"(\d+(?:\.\d+)?)[\s-]*(?:lbs?|pounds?)\b", text, re.I)
     if lb:
         kg = round(float(lb.group(1)) * LB_TO_KG, 2)
         notes.append(f"converted {lb.group(1)} lb -> {kg} kg")
         return kg, notes
-    kg = re.search(r"(\d+(?:\.\d+)?)\s*(?:kg|kilo|kilogram)", text, re.I)
+    kg = re.search(r"(\d+(?:\.\d+)?)[\s-]*(?:kgs?|kilo(?:gram)?s?)\b", text, re.I)
     if kg:
         return float(kg.group(1)), notes
     return None, notes
@@ -132,17 +190,15 @@ def parse_weight(text: str) -> tuple[float | None, list[str]]:
 
 def extract_regex(text: str) -> Request:
     req = Request(raw_text=text)
+    dtext = digitize(text)  # height/operator parsing read the digitised copy
 
-    tower = re.findall(r"\bTWR-\d+\b", text, re.I)
-    if tower:
-        req.tower_id = tower[0].upper()
-        if len(set(t.upper() for t in tower)) > 1:
-            req.notes.append("multiple tower IDs found; used the first")
+    req.tower_id, tnotes = normalize_tower(text)
+    req.notes += tnotes
 
     req.weight_kg, wnotes = parse_weight(text)
     req.notes += wnotes
 
-    h = re.search(r"(\d+(?:\.\d+)?)\s*(?:m\b|meter|metre)", text, re.I)
+    h = re.search(r"(\d+(?:\.\d+)?)[\s-]*(?:m\b|meters?|metres?)", dtext, re.I)
     if h:
         req.height_m = float(h.group(1))
 
@@ -150,6 +206,14 @@ def extract_regex(text: str) -> Request:
         if re.search(rf"\b{re.escape(op)}\b", text, re.I):
             req.operator = op
             break
+    if req.operator is None:  # unknown carrier: grab the name before the verb
+        m = re.search(r"\b([A-Z][\w&]*(?:\s+[A-Z][\w&]*){0,2})\s+"
+                      r"(?:wants?|needs?|requests?|require|would like|asks?|is requesting)",
+                      text)
+        _STOP = {"the", "a", "an", "someone", "somebody", "client", "tenant",
+                 "operator", "we", "they", "it", "this", "that", "please", "new"}
+        if m and m.group(1).strip().lower() not in _STOP:
+            req.operator = m.group(1).strip()
 
     a = re.search(r"((?:\w+\s+){0,2}(?:antenna|radio|dish|unit|repeater|panel))", text, re.I)
     if a:
@@ -375,6 +439,8 @@ def show(d: Decision) -> None:
 
 def run_tests() -> None:
     agent = Agent()
+    print("AI extraction available via --llm (needs ANTHROPIC_API_KEY).")
+    print("These tests use the offline regex parser so results are deterministic.\n")
     cases = [
         ("Operator Du wants to mount a 15kg 5G antenna at a height of 40 meters on Tower TWR-101.", "APPROVED"),
         ("Vodafone wants a 60kg radio unit at 30 meters on TWR-101.", "REJECTED"),
