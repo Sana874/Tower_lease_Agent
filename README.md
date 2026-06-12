@@ -1,55 +1,113 @@
 # Tower Lease Vetting Agent
 
-This reads a lease request written in plain English (like "Du wants a 15kg antenna at 40m on TWR-101"), checks it against the tower's capacity and the rules for that region, and decides: approved, rejected, or send it to a human.
+A command-line agent that reads a tower lease request written in free-form natural language, checks it against tower capacity and regional policy, and returns a verdict: **APPROVED**, **REJECTED**, or **NEEDS REVIEW**.
 
-## Running it
+Requests can be phrased however — different operators, unit conventions (kg or lb), number formats (digits or words), and tower id styles (`TWR-101`, `TWR101`, `tower 101`) are all handled without a fixed template.
 
-You just need Python 3. Nothing to install for the normal mode.
+---
 
-    python tower_agent.py            -> runs my test cases (7 of them)
-    python tower_agent.py --batch    -> runs a queue of requests + shows the impact numbers
-    python tower_agent.py "Du wants a 15kg antenna at 40 meters on TWR-101."
+## Quickstart
 
-Keep tower_agent.py, towers_inventory.json and regional_policies.txt in the same folder.
+No dependencies beyond Python 3 for the offline mode.
 
-## How I built it
+```bash
+# run the built-in test suite (7 cases, fully offline)
+python tower_agent.py
 
-The flow is: text -> pull out the details -> look up the tower + region rules -> decide.
+# vet a single request
+python tower_agent.py "Ooredoo wants a 55 lb antenna at twenty metres on tower 102"
 
-The main thing I was careful about is that the AI does NOT make the decision. It only reads the request and figures out the numbers. The actual approve/reject is done by normal code (the Rules class). I did it this way on purpose - a weight check on a real tower is a safety thing, so I want it to be exact and the same every time, not something an AI guessed. The AI is good at reading messy English, the code is good at the maths, so each does its part.
+# structured JSON output (useful for piping or integration)
+python tower_agent.py --json "Du wants a 15kg antenna at 40 meters on TWR-101."
 
-Because of that the whole thing also runs without any AI/API at all - it falls back to a regex parser. That's the mode the test cases use.
+# run a batch queue and print the impact report
+python tower_agent.py --batch
+```
 
-## Additional scope covered as a part of this project
+Keep `tower_agent.py`, `towers_inventory.json`, and `regional_policies.txt` in the same folder.
 
-- Pounds vs kg. People write "33 lb" not always "15 kg". If you just read the number and treat it as kg you get the load wrong, so I convert lb to kg first.
-- Same tower, multiple requests. Two requests can each fit on their own but not both. So once something's approved I "reserve" that weight, and the next request sees the real space left. Otherwise you'd approve two things that overload the tower.
-- If I'm not confident I read the request right (missing info, weird text), I send it to a human even if it would've passed. Rather hold it than wrongly approve.
-- Junk values like negative or zero weight get caught before the rules run.
-- Every decision gets written to audit_log.jsonl so there's a record of what happened.
+---
 
-## The impact part
+## Architecture
 
---batch also prints how many got auto-decided, how much yearly revenue the approved leases bring in, and roughly how much analyst time it saves vs someone checking each one by hand. The money/time numbers are assumptions I put at the top of the file - real numbers would just go there instead.
+```
+free-text input
+     │
+     ▼
+ Extraction layer          ← AI (LLM tool loop) or offline regex parser
+     │                        pulls: operator, asset, weight, height, tower id
+     ▼
+ Rules.decide()            ← deterministic code only — no AI involved here
+     │                        checks: completeness → sanity → tower exists →
+     │                                weight capacity → regional policy → confidence
+     ▼
+ APPROVED / REJECTED / NEEDS_REVIEW
+     │
+     ▼
+ audit_log.jsonl           ← append-only record of every decision
+```
 
-## Using the AI version (optional)
+**The AI never makes the verdict.** It handles the fuzzy part — reading varied natural language — while the rules handle everything that has to be exact and reproducible. A structural weight check is a safety decision; "the model said so" is not an acceptable audit trail entry. The clean separation also means the system works identically with no API key at all, falling back to the offline regex parser.
 
-It works fine without this. But if you want to try the AI extraction, use an Anthropic key :
+---
 
-    pip install anthropic
-    set ANTHROPIC_API_KEY=your-key        (Windows)
-    export ANTHROPIC_API_KEY=your-key     (Mac/Linux)
-    python tower_agent.py --llm "Du wants a 15kg antenna at 40 meters on TWR-101."
+## Design decisions worth noting
 
-If there's no key it just uses the regex parser, so it never breaks.
+**Unit normalisation.** Tenants write `33 lb` as often as `33 kg`. Reading the raw number and comparing it against a kg limit would silently mis-size the load — a 33 lb asset treated as 33 kg would wrongly clear a 25 kg regional cap. All weights are converted to kg before any check runs.
 
+**Cumulative load tracking.** Two requests on the same tower can each fit in isolation but not together. As leases are approved, capacity is reserved in-session, so each subsequent request sees real remaining headroom rather than the original figure. This is the obvious failure mode the moment you process more than one request against the same tower.
+
+**Confidence-gated routing.** If extraction confidence falls below the threshold — missing fields, ambiguous phrasing, multiple conflicting tower ids — the request is routed to a human reviewer even when the rules would have passed it. A held lease is better than a wrong auto-approval on a structure.
+
+**Input robustness.** The offline parser handles: hyphenated units (`15-kg`, `40-meter`), spelled-out numbers (`forty metres`, `twenty-eight kilograms`), loose tower id formats (`TWR101`, `TWR 101`, `tower #102`), and unknown operators (name inferred from context). Failures degrade safely — a field that can't be read becomes missing, missing fields trigger `NEEDS_REVIEW`.
+
+**Sanity checks before rules.** Zero or negative weight/height values are caught before reaching the rules engine and routed to review rather than matched against thresholds.
+
+---
+
+## Batch mode and impact reporting
+
+`--batch` processes a queue of requests with a shared session (so cumulative load applies across the queue) and prints an impact summary:
+
+```
+IMPACT (this batch)
+  requests processed     6
+  auto-decided           5 (83%)
+  routed to a human      1 (17%)
+  recurring revenue      AED 312,960/yr from approved leases
+  analyst time saved     2.1 hrs  (~AED 252)
+```
+
+The pricing and cost constants (`LEASE_BASE_FEE_AED`, `LEASE_PER_KG_AED`, `ANALYST_COST_PER_HOUR_AED`) are declared at the top of the file — drop in real numbers when available.
+
+---
+
+## Optional: AI extraction mode
+
+The system runs fully offline by default. To enable the LLM extraction path:
+
+```bash
+pip install anthropic
+
+# macOS / Linux
+export ANTHROPIC_API_KEY=your-key
+
+# Windows
+set ANTHROPIC_API_KEY=your-key
+
+python tower_agent.py --llm "Du wants a 15kg antenna at 40 meters on TWR-101."
+```
+
+The LLM path uses a tool-calling loop: the model is given `lookup_tower` and `get_regional_policies` tools to ground its reading against live inventory data, then calls `submit` with structured fields. If the API call fails for any reason, it falls back to the regex parser silently — the agent never crashes on a missing key or network error.
+
+---
 
 ## Files
 
-|         File           |                    What it is                              |
-|------------------------|------------------------------------------------------------|
-| tower_agent.py         | the agent                                                  |
-| towers_inventory.json  | the towers (120 of them, includes the 2 from the question) |
-| regional_policies.txt  | the region rules                                           |
-| gen_inventory.py       | what I used to make the tower list                         |
-| audit_log.jsonl        | gets created when you run it, not part of the code         |
+| File | Description |
+|---|---|
+| `tower_agent.py` | Agent, extraction logic, rules engine, CLI |
+| `towers_inventory.json` | 120 towers across 6 regions (includes TWR-101 and TWR-102) |
+| `regional_policies.txt` | Per-region height and weight limits |
+| `gen_inventory.py` | Script used to generate the tower inventory |
+| `audit_log.jsonl` | Created at runtime — append-only decision log |
